@@ -1,0 +1,15 @@
+# Runtime logs
+*.log
+
+# Local/editor noise
+.vscode/
+.idea/
+*.swp
+*.tmp
+
+# PowerShell generated files
+*.ps1xml
+
+# Windows metadata
+Thumbs.db
+Desktop.ini
