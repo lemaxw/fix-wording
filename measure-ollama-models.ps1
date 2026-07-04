@@ -49,8 +49,9 @@ Preserve meaning, line breaks, bullet markers, indentation, and item order.
 The selected text has $lineCount lines and $bulletCount bullet items.
 If there are bullet items, output exactly $bulletCount bullet items.
 If non-bullet lines appear before a bullet list, keep them as separate non-bullet lines.
-Keep each line in its original language.
-English lines stay English. Russian lines stay Russian. Hebrew lines stay Hebrew.
+Fix misspellings inside each language segment, but keep each segment in its original language.
+English words stay English. Russian words stay Russian. Hebrew words stay Hebrew.
+When a sentence mixes languages, preserve the same language mix inside that sentence.
 Do not add advice, examples, notes, headings, or explanations.
 Preserve names, commands, code, file paths, URLs, logs, and technical terms.
 Return only JSON in this exact shape: {"text":"..."}

@@ -176,8 +176,9 @@ Preserve meaning, line breaks, bullet markers, indentation, and item order.
 The selected text has $lineCount lines and $bulletCount bullet items.
 If there are bullet items, output exactly $bulletCount bullet items.
 If non-bullet lines appear before a bullet list, keep them as separate non-bullet lines.
-Keep each line in its original language.
-English lines stay English. Russian lines stay Russian. Hebrew lines stay Hebrew.
+Fix misspellings inside each language segment, but keep each segment in its original language.
+English words stay English. Russian words stay Russian. Hebrew words stay Hebrew.
+When a sentence mixes languages, preserve the same language mix inside that sentence.
 Do not add advice, examples, notes, headings, or explanations.
 Preserve names, commands, code, file paths, URLs, logs, and technical terms.
 Return only JSON in this exact shape: {"text":"..."}
@@ -289,6 +290,15 @@ function Get-BulletItemCount {
     return ([regex]::Matches($Text, "(?m)^\s*(?:[-*+]|\d+[.)])\s+")).Count
 }
 
+function Get-ScriptCharCount {
+    param(
+        [string]$Text,
+        [string]$Pattern
+    )
+
+    return ([regex]::Matches($Text, $Pattern)).Count
+}
+
 function Test-ContainsPolishLetters {
     param([string]$Text)
 
@@ -315,14 +325,22 @@ function Test-NeedsFallbackResponse {
         return $true
     }
 
-    if (($OriginalText -match "[\u0590-\u05FF]") -and ($FixedText -notmatch "[\u0590-\u05FF]")) {
-        Write-Log "Fallback needed: Hebrew script disappeared"
-        return $true
+    $originalHebrewCount = Get-ScriptCharCount -Text $OriginalText -Pattern "[\u0590-\u05FF]"
+    if ($originalHebrewCount -gt 0) {
+        $fixedHebrewCount = Get-ScriptCharCount -Text $FixedText -Pattern "[\u0590-\u05FF]"
+        if ($fixedHebrewCount -lt [math]::Ceiling($originalHebrewCount * 0.7)) {
+            Write-Log "Fallback needed: Hebrew script count dropped from $originalHebrewCount to $fixedHebrewCount"
+            return $true
+        }
     }
 
-    if (($OriginalText -match "[\u0400-\u04FF]") -and ($FixedText -notmatch "[\u0400-\u04FF]")) {
-        Write-Log "Fallback needed: Cyrillic script disappeared"
-        return $true
+    $originalCyrillicCount = Get-ScriptCharCount -Text $OriginalText -Pattern "[\u0400-\u04FF]"
+    if ($originalCyrillicCount -gt 0) {
+        $fixedCyrillicCount = Get-ScriptCharCount -Text $FixedText -Pattern "[\u0400-\u04FF]"
+        if ($fixedCyrillicCount -lt [math]::Ceiling($originalCyrillicCount * 0.7)) {
+            Write-Log "Fallback needed: Cyrillic script count dropped from $originalCyrillicCount to $fixedCyrillicCount"
+            return $true
+        }
     }
 
     return $false
