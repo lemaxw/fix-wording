@@ -1,11 +1,21 @@
 param(
     [switch]$ShowWindow,
-    [switch]$DisableLogging
+    [switch]$DisableLogging,
+    [string]$Model,
+    [string]$FallbackModel
 )
 
 $ErrorActionPreference = "Stop"
 
 $ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+. (Join-Path $ScriptDir "fix-wording-config.ps1")
+if (-not $PSBoundParameters.ContainsKey("Model")) {
+    $Model = $DefaultModel
+}
+if (-not $PSBoundParameters.ContainsKey("FallbackModel")) {
+    $FallbackModel = $DefaultFallbackModel
+}
+
 $WorkerPath = Join-Path $ScriptDir "fix-wording.ps1"
 $LogPath = Join-Path $ScriptDir "fix-wording-listener.log"
 $LoggingEnabled = -not $DisableLogging
@@ -37,6 +47,12 @@ Write-Log "Worker path: $WorkerPath"
 Write-Log "PowerShell PID: $PID"
 Write-Log "ShowWindow: $ShowWindow"
 Write-Log "DisableLogging: $DisableLogging"
+Write-Log "Model: $Model"
+if ([string]::IsNullOrWhiteSpace($FallbackModel)) {
+    Write-Log "FallbackModel: <disabled>"
+} else {
+    Write-Log "FallbackModel: $FallbackModel"
+}
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -360,7 +376,8 @@ $form.Add_HotkeyPressed({
             "-OriginalClipboardFile", (Quote-Arg $originalClipboardFile),
             "-TargetWindowHandle", $targetHandleValue.ToString(),
             "-Mode", "polish",
-            "-Model", "mistral-nemo:12b"
+            "-Model", (Quote-Arg $Model),
+            "-FallbackModel", (Quote-Arg $FallbackModel)
         ) -join " "
 
         if ($selectedHtml) {

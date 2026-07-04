@@ -13,7 +13,8 @@ param(
     [string]$SelectedRtfFile,
 
     [string]$Mode = "polish",
-    [string]$Model = "mistral-nemo:12b",
+    [string]$Model,
+    [string]$FallbackModel,
 
     [switch]$DisableLogging
 )
@@ -21,6 +22,14 @@ param(
 $ErrorActionPreference = "Stop"
 
 $ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+. (Join-Path $ScriptDir "fix-wording-config.ps1")
+if (-not $PSBoundParameters.ContainsKey("Model")) {
+    $Model = $DefaultModel
+}
+if (-not $PSBoundParameters.ContainsKey("FallbackModel")) {
+    $FallbackModel = $DefaultFallbackModel
+}
+
 $LogPath = Join-Path $ScriptDir "fix-wording.log"
 $OllamaUrl = "http://127.0.0.1:11434/api/chat"
 $PasteDelayMs = 350
@@ -55,6 +64,11 @@ Write-Log "SelectedHtmlFile: $SelectedHtmlFile"
 Write-Log "SelectedRtfFile: $SelectedRtfFile"
 Write-Log "Mode: $Mode"
 Write-Log "Model: $Model"
+if ([string]::IsNullOrWhiteSpace($FallbackModel)) {
+    Write-Log "FallbackModel: <disabled>"
+} else {
+    Write-Log "FallbackModel: $FallbackModel"
+}
 Write-Log "DisableLogging: $DisableLogging"
 Write-Log "PowerShell PID: $PID"
 
@@ -128,15 +142,12 @@ function Show-Message {
 
 function New-SystemPrompt {
     return @"
-You are my local English wording assistant.
+You are my local wording assistant.
 
 You improve wording conservatively.
 Preserve the user's meaning exactly.
-Do not infer missing context.
-Do not replace nouns with guessed alternatives.
-For example, if the user wrote "window", keep "window"; do not change it to "terminal", "screen", or another object.
-Return only the corrected text.
-Never add an introduction, heading, label, explanation, Markdown, or quotes.
+Preserve the selected text's language, structure, line breaks, bullet format, and item order.
+Return only the rewritten selected text in the JSON shape requested by the user prompt.
 "@
 }
 
@@ -146,44 +157,32 @@ function New-WordingPrompt {
         [string]$SelectedMode
     )
 
+    $lineCount = ($Text -split "\r\n|\n|\r").Count
+    $bulletCount = ([regex]::Matches($Text, "(?m)^\s*(?:[-*+]|\d+[.)])\s+")).Count
+    $modeInstruction = switch ($SelectedMode) {
+        "fix" { "Fix grammar, spelling, punctuation, and awkward wording only." }
+        "polish" { "Improve clarity and flow while staying close to the original." }
+        "professional" { "Make it clear and professional, but not too formal." }
+        "short" { "Make it shorter and cleaner." }
+        "explain" { "Improve the selected text only; do not explain unless the selected text asks for an explanation." }
+        default { "Improve clarity and flow while staying close to the original." }
+    }
+
     return @"
-You are my local English wording assistant.
+Fix wording only.
+$modeInstruction
+Do not translate.
+Preserve meaning, line breaks, bullet markers, indentation, and item order.
+The selected text has $lineCount lines and $bulletCount bullet items.
+If there are bullet items, output exactly $bulletCount bullet items.
+If non-bullet lines appear before a bullet list, keep them as separate non-bullet lines.
+Keep each line in its original language.
+English lines stay English. Russian lines stay Russian. Hebrew lines stay Hebrew.
+Do not add advice, examples, notes, headings, or explanations.
+Preserve names, commands, code, file paths, URLs, logs, and technical terms.
+Return only JSON in this exact shape: {"text":"..."}
 
-Task:
-Improve my text according to the selected mode.
-
-Mode:
-$SelectedMode
-
-Modes:
-
-* fix: only fix grammar, spelling, punctuation, and awkward wording.
-* polish: improve clarity and flow while staying close to the original.
-* professional: make it clear and professional, but not too formal.
-* short: make it shorter and cleaner.
-* explain: return the improved version, then briefly explain the main corrections.
-
-Rules:
-
-* Preserve my original meaning.
-* Keep my direct style.
-* Do not add new facts.
-* Do not make it sound like marketing text.
-* Do not make it unnecessarily formal.
-* Preserve technical terms.
-* Preserve names, commands, code, file paths, URLs, logs, and quoted text.
-* If the input contains code, do not rewrite the code unless it contains comments or user-facing strings.
-
-CRITICAL OUTPUT RULE:
-Return only the final improved text.
-Do not add headings.
-Do not add explanations.
-Do not use Markdown.
-Do not wrap the answer in quotes.
-Do not start with phrases like "Here's your polished text:" or "Improved text:".
-Do not change concrete nouns or technical words unless they are clearly misspelled.
-
-Text:
+TEXT:
 $Text
 "@
 }
@@ -194,8 +193,9 @@ function Remove-ModelPreamble {
     $clean = $Text.Trim()
     $patterns = @(
         "^\s*here(?:'s| is)\s+(?:your\s+)?(?:polished|improved|corrected|fixed|revised)?\s*text\s*:\s*(?:\r?\n)+",
+        "^\s*here\s+is\s+the\s+(?:polished|improved|corrected|fixed|revised)?\s*text(?:\s+in\s+[A-Za-z]+)?\s*:\s*(?:\r?\n)+",
         "^\s*(?:polished|improved|corrected|fixed|revised)\s+text\s*:\s*(?:\r?\n)+",
-        "^\s*(?:sure|certainly)\s*,?\s+(?:here(?:'s| is)\s+)?(?:your\s+)?(?:polished|improved|corrected|fixed|revised)?\s*text\s*:\s*(?:\r?\n)+"
+        "^\s*(?:sure|certainly)\s*,?\s+(?:here(?:'s| is)\s+)?(?:your\s+)?(?:polished|improved|corrected|fixed|revised)?\s*text(?:\s+in\s+[A-Za-z]+)?\s*:\s*(?:\r?\n)+"
     )
 
     foreach ($pattern in $patterns) {
@@ -207,6 +207,125 @@ function Remove-ModelPreamble {
     }
 
     return $clean
+}
+
+function Convert-ModelJsonStringToText {
+    param([string]$Text)
+
+    $clean = $Text.Trim()
+    if ($clean.Length -lt 2) {
+        return $clean
+    }
+
+    try {
+        $parsed = $clean | ConvertFrom-Json
+        if ($parsed -is [string]) {
+            Write-Log "Parsed model JSON string response"
+            return $parsed.Trim()
+        }
+
+        if ($null -ne $parsed.text -and $parsed.text -is [string]) {
+            Write-Log "Parsed model JSON object text response"
+            return Convert-ModelJsonStringToText -Text $parsed.text
+        }
+
+        if ($null -ne $parsed.text -and $parsed.text -is [System.Array]) {
+            Write-Log "Parsed model JSON object text array response"
+            return (($parsed.text | ForEach-Object { [string]$_ }) -join "`n").Trim()
+        }
+    } catch {
+        Write-Log "Model response was not a valid JSON string; trying wrapper removal"
+    }
+
+    $quotePairs = @(
+        @{ Open = '"'; Close = '"' },
+        @{ Open = "'"; Close = "'" },
+        @{ Open = [string][char]0x201C; Close = [string][char]0x201D },
+        @{ Open = [string][char]0x2018; Close = [string][char]0x2019 }
+    )
+
+    foreach ($pair in $quotePairs) {
+        if ($clean.StartsWith($pair.Open) -and $clean.EndsWith($pair.Close)) {
+            $inner = $clean.Substring(1, $clean.Length - 2).Trim()
+            if (-not [string]::IsNullOrWhiteSpace($inner)) {
+                Write-Log "Removed model response wrapper"
+                return Convert-ModelJsonStringToText -Text $inner
+            }
+        }
+    }
+
+    if ($clean.StartsWith('"') -and $clean.EndsWith('"}')) {
+        $trimmed = $clean
+        while ($trimmed.EndsWith("}") -and -not $trimmed.EndsWith('"}"')) {
+            $trimmed = $trimmed.Substring(0, $trimmed.Length - 1).Trim()
+        }
+
+        if ($trimmed.EndsWith('"')) {
+            Write-Log "Removed malformed trailing model JSON brace"
+            return Convert-ModelJsonStringToText -Text $trimmed
+        }
+    }
+
+    if ($clean.StartsWith("{") -and $clean.EndsWith("}")) {
+        $inner = $clean.Substring(1, $clean.Length - 2).Trim()
+        if (
+            $inner.Length -ge 2 -and
+            (
+                ($inner.StartsWith('"') -and $inner.EndsWith('"')) -or
+                ($inner.StartsWith("'") -and $inner.EndsWith("'"))
+            )
+        ) {
+            Write-Log "Removed malformed model JSON wrapper"
+            return Convert-ModelJsonStringToText -Text $inner
+        }
+    }
+
+    return $clean
+}
+
+function Get-BulletItemCount {
+    param([string]$Text)
+
+    return ([regex]::Matches($Text, "(?m)^\s*(?:[-*+]|\d+[.)])\s+")).Count
+}
+
+function Test-ContainsPolishLetters {
+    param([string]$Text)
+
+    return ($Text -match "[\u0104\u0105\u0106\u0107\u0118\u0119\u0141\u0142\u0143\u0144\u00D3\u00F3\u015A\u015B\u0179\u017A\u017B\u017C]")
+}
+
+function Test-NeedsFallbackResponse {
+    param(
+        [string]$OriginalText,
+        [string]$FixedText
+    )
+
+    $originalBulletCount = Get-BulletItemCount -Text $OriginalText
+    if ($originalBulletCount -gt 0) {
+        $fixedBulletCount = Get-BulletItemCount -Text $FixedText
+        if ($fixedBulletCount -ne $originalBulletCount) {
+            Write-Log "Fallback needed: bullet count changed from $originalBulletCount to $fixedBulletCount"
+            return $true
+        }
+    }
+
+    if ((-not (Test-ContainsPolishLetters -Text $OriginalText)) -and (Test-ContainsPolishLetters -Text $FixedText)) {
+        Write-Log "Fallback needed: output appears to introduce Polish"
+        return $true
+    }
+
+    if (($OriginalText -match "[\u0590-\u05FF]") -and ($FixedText -notmatch "[\u0590-\u05FF]")) {
+        Write-Log "Fallback needed: Hebrew script disappeared"
+        return $true
+    }
+
+    if (($OriginalText -match "[\u0400-\u04FF]") -and ($FixedText -notmatch "[\u0400-\u04FF]")) {
+        Write-Log "Fallback needed: Cyrillic script disappeared"
+        return $true
+    }
+
+    return $false
 }
 
 function Get-HtmlLinks {
@@ -579,10 +698,6 @@ function Invoke-OllamaChat {
         model = $SelectedModel
         messages = @(
             @{
-                role = "system"
-                content = $SystemPrompt
-            },
-            @{
                 role = "user"
                 content = $Prompt
             }
@@ -595,6 +710,7 @@ function Invoke-OllamaChat {
     }
 
     $body = $bodyObject | ConvertTo-Json -Depth 10
+    $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($body)
 
     Write-Log "Ollama request start: $OllamaUrl"
     Write-Log "Ollama request model: $SelectedModel"
@@ -603,8 +719,8 @@ function Invoke-OllamaChat {
         $response = Invoke-RestMethod `
             -Uri $OllamaUrl `
             -Method Post `
-            -ContentType "application/json" `
-            -Body $body `
+            -ContentType "application/json; charset=utf-8" `
+            -Body $bodyBytes `
             -TimeoutSec 180
     } catch {
         $message = $_.Exception.Message
@@ -619,7 +735,7 @@ function Invoke-OllamaChat {
         }
 
         if (($bodyText -match "model.*not.*found|not found|pull") -or ($message -match "404|not found")) {
-            throw "Model '$SelectedModel' is missing. Run: ollama pull mistral-nemo:12b"
+            throw "Model '$SelectedModel' is missing. Run: ollama pull $SelectedModel"
         }
 
         throw
@@ -702,7 +818,17 @@ try {
     Write-Log "System prompt length: $($systemPrompt.Length)"
     Write-Log "Prompt length: $($prompt.Length)"
 
-    $fixedText = Remove-ModelPreamble -Text (Invoke-OllamaChat -SystemPrompt $systemPrompt -Prompt $prompt -SelectedModel $Model)
+    $fixedText = Convert-ModelJsonStringToText -Text (Remove-ModelPreamble -Text (Invoke-OllamaChat -SystemPrompt $systemPrompt -Prompt $prompt -SelectedModel $Model))
+
+    if (
+        (-not [string]::IsNullOrWhiteSpace($FallbackModel)) -and
+        (Test-NeedsFallbackResponse -OriginalText $selectedText -FixedText $fixedText) -and
+        ($Model -ne $FallbackModel)
+    ) {
+        Write-Log "Retrying with fallback model: $FallbackModel"
+        $fixedText = Convert-ModelJsonStringToText -Text (Remove-ModelPreamble -Text (Invoke-OllamaChat -SystemPrompt $systemPrompt -Prompt $prompt -SelectedModel $FallbackModel))
+    }
+
     Write-Log "Response length: $($fixedText.Length)"
 
     if ([string]::IsNullOrWhiteSpace($fixedText)) {
@@ -767,7 +893,7 @@ try {
 
     $displayMessage = $message
     if ($message -match "model.*missing|model.*not.*found|not found") {
-        $displayMessage = "Model '$Model' is missing. Run: ollama pull mistral-nemo:12b"
+        $displayMessage = "Model '$Model' is missing. Run: ollama pull $Model"
     } elseif ($message -match "Unable to connect|actively refused|No connection|timed out|Ollama is not reachable") {
         $displayMessage = "Ollama is not reachable at http://127.0.0.1:11434"
     }

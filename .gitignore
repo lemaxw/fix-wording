@@ -1,5 +1,7 @@
 # Runtime logs
 *.log
+ollama-model-benchmark-*.csv
+ollama-model-benchmark-*.md
 
 # Local/editor noise
 .vscode/
